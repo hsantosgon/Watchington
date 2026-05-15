@@ -13,23 +13,17 @@
         body {
             font-family: 'Inter', sans-serif;
         }
-        /* Fluid performance booster class for seamless expansions */
-        .maximized-stream {
-            position: fixed !important;
-            top: 0 !important;
-            left: 0 !important;
-            width: 100vw !important;
-            height: 100vh !important;
-            z-index: 9999 !important;
-            padding: 0 !important;
-        }
         /* Visual styling indicators during active dragging motions */
         .sortable-ghost {
-            opacity: 0.3;
-            border: 2px dashed #dc2626 !important;
+            opacity: 0.1;
+            background: #0f172a !important;
         }
         .sortable-chosen {
             cursor: grabbing !important;
+        }
+        /* Custom rule to hide cards dynamically based on application filter states */
+        .card-offline-hidden {
+            display: none !important;
         }
     </style>
 </head>
@@ -46,6 +40,25 @@
             </div>
 
             <div class="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
+                
+                <div class="flex items-center bg-slate-800 border border-slate-700 rounded-xl px-2 py-1.5 transition status-panel">
+                    <i data-lucide="settings-2" class="w-4 h-4 text-red-500 mr-1.5"></i>
+                    <select id="globalQualitySelector" onchange="changeAllQualities(this.value)" class="bg-transparent text-xs font-medium text-slate-200 outline-none cursor-pointer pr-2">
+                        <option value="auto" class="bg-slate-900 text-slate-200">Auto Quality</option>
+                        <option value="chunked" class="bg-slate-900 text-slate-200">Source (1080p)</option>
+                        <option value="720p60" class="bg-slate-900 text-slate-200">720p60</option>
+                        <option value="720p" class="bg-slate-900 text-slate-200">720p</option>
+                        <option value="480p" class="bg-slate-900 text-slate-200">480p</option>
+                        <option value="360p" class="bg-slate-900 text-slate-200">360p</option>
+                        <option value="160p" class="bg-slate-900 text-slate-200">160p</option>
+                    </select>
+                </div>
+
+                <button id="toggleOfflineFilterBtn" onclick="toggleOfflineFilter()" class="bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 px-3 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2" title="Toggle visibility of offline channels">
+                    <i id="filterIcon" data-lucide="video" class="w-4 h-4 text-emerald-500"></i>
+                    <span id="filterText">Showing All</span>
+                </button>
+
                 <form id="addStreamForm" class="flex items-center bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 focus-within:border-red-500 transition w-full sm:w-64">
                     <i data-lucide="twitch" class="text-purple-400 w-4 h-4 mr-2"></i>
                     <input type="text" id="streamerInput" placeholder="Enter Twitch username..." class="bg-transparent text-sm text-slate-200 placeholder-slate-500 outline-none w-full">
@@ -111,14 +124,30 @@
         </div>
     </div>
 
+    <div id="theaterOverlay" class="fixed inset-0 bg-slate-950 z-[9999] hidden flex-col">
+        <div class="bg-slate-900 border-b border-slate-800 px-4 py-2 flex justify-between items-center shrink-0">
+            <span id="theaterTitle" class="text-sm font-bold text-red-500 flex items-center gap-2"></span>
+            <button onclick="closeTheaterMode()" class="bg-slate-800 hover:bg-red-600 text-white p-1.5 rounded-xl transition flex items-center gap-1.5 text-xs font-medium px-3">
+                <i data-lucide="minimize-2" class="w-4 h-4"></i> Return to Grid
+            </button>
+        </div>
+        <div id="theaterPlayerContainer" class="flex-1 w-full h-full bg-black"></div>
+    </div>
+
     <div id="toast" class="fixed bottom-6 right-6 bg-emerald-600 text-white text-sm px-4 py-2.5 rounded-xl shadow-xl transition-all duration-300 opacity-0 pointer-events-none transform translate-y-2 flex items-center gap-2 z-50">
         <i id="toastIcon" data-lucide="check-circle" class="w-4 h-4"></i> <span id="toastMsg">Link copied to clipboard!</span>
     </div>
 
     <script>
         let activeStreams = [];
-        let playerInstances = {}; // Reference map storing active Twitch SDK players
-        let sortableInstance = null; // SortableJS controller container
+        let playerInstances = {}; 
+        let currentMuteStates = {}; 
+        let streamOnlineStates = {}; 
+        let hideOfflineStreams = false; 
+        let sortableInstance = null; 
+        let theaterPlayer = null;
+        let globalKeepAliveInterval = null;
+        let selectedGlobalQuality = "auto"; // NEW: Persistent tracker for global quality preference
 
         const streamGrid = document.getElementById('streamGrid');
         const emptyState = document.getElementById('emptyState');
@@ -130,32 +159,47 @@
         const indexStreamList = document.getElementById('indexStreamList');
         const streamCountBadge = document.getElementById('streamCountBadge');
         const savedSquadsContainer = document.getElementById('savedSquadsContainer');
+        const theaterOverlay = document.getElementById('theaterOverlay');
+        const theaterPlayerContainer = document.getElementById('theaterPlayerContainer');
+        const theaterTitle = document.getElementById('theaterTitle');
+        const toggleOfflineFilterBtn = document.getElementById('toggleOfflineFilterBtn');
         const toast = document.getElementById('toast');
+        const globalQualitySelector = document.getElementById('globalQualitySelector');
 
         window.addEventListener('DOMContentLoaded', () => {
             renderSavedSquads();
             initDragAndDrop();
+            startGlobalKeepAlive();
 
             const params = new URLSearchParams(window.location.search);
             const loadedStreams = params.get('streams');
             if (loadedStreams) {
                 loadedStreams.split(',').forEach(s => {
                     const name = s.trim().toLowerCase();
-                    if(name && !activeStreams.includes(name)) activeStreams.push(name);
+                    if(name && !activeStreams.includes(name)) {
+                        activeStreams.push(name);
+                        currentMuteStates[name] = true; 
+                        streamOnlineStates[name] = false; 
+                    }
                 });
             }
             updateUI();
         });
 
-        // Initialize Sortable Drag-and-Drop Mechanics Engine
         function initDragAndDrop() {
             sortableInstance = new Sortable(streamGrid, {
-                animation: 250,
+                animation: 200,
                 ghostClass: 'sortable-ghost',
                 chosenClass: 'sortable-chosen',
-                handle: '.drag-handle', // Limits drag engagement specifically to the title badge
+                handle: '.drag-handle', 
+                onStart: function(evt) {
+                    activeStreams.forEach(stream => {
+                        const target = document.getElementById(`player-target-${stream}`);
+                        if(target) target.innerHTML = '';
+                        if(playerInstances[stream]) delete playerInstances[stream];
+                    });
+                },
                 onEnd: function () {
-                    // Recompile the array based on the new visual order of DOM elements
                     const reorderedStreams = [];
                     const renderedCards = streamGrid.querySelectorAll('[data-channel]');
                     
@@ -165,7 +209,10 @@
                     
                     activeStreams = reorderedStreams;
                     
-                    // Sync up everything else smoothly without full iFrame reloads
+                    activeStreams.forEach(stream => {
+                        buildTwitchPlayerInstance(stream);
+                    });
+                    
                     renderSidebarIndex();
                     updateUrlHistory();
                 }
@@ -186,12 +233,16 @@
             if (!cleanName || activeStreams.includes(cleanName)) return;
 
             activeStreams.push(cleanName);
+            currentMuteStates[cleanName] = true;
+            streamOnlineStates[cleanName] = false; 
             updateUI();
         }
 
         function removeStream(channelName) {
             activeStreams = activeStreams.filter(s => s !== channelName);
             if (playerInstances[channelName]) delete playerInstances[channelName];
+            if (currentMuteStates[channelName] !== undefined) delete currentMuteStates[channelName];
+            if (streamOnlineStates[channelName] !== undefined) delete streamOnlineStates[channelName];
             updateUI();
         }
 
@@ -200,26 +251,124 @@
             if (player) {
                 const isMuted = player.getMuted();
                 player.setMuted(!isMuted);
+                currentMuteStates[channelName] = !isMuted;
                 setTimeout(renderSidebarIndex, 100);
             }
         }
 
-        function toggleMaximize(cardId, channelName) {
-            const targetCard = document.getElementById(cardId);
-            const icon = document.getElementById(`max-icon-${cardId}`);
-            const player = playerInstances[channelName];
-            
-            if (targetCard.classList.contains('maximized-stream')) {
-                targetCard.classList.remove('maximized-stream');
-                icon.setAttribute('data-lucide', 'maximize-2');
-            } else {
-                targetCard.classList.add('maximized-stream');
-                icon.setAttribute('data-lucide', 'minimize-2');
+        // NEW: Global Quality Execution Handler
+        function changeAllQualities(qualityValue) {
+            selectedGlobalQuality = qualityValue;
+            let executionCount = 0;
+
+            activeStreams.forEach(stream => {
+                const player = playerInstances[stream];
                 if (player) {
-                    setTimeout(() => { player.play(); }, 150);
+                    try {
+                        const availableOptions = player.getQualities();
+                        
+                        // Check if the source channel options support the selected configuration criteria
+                        if (availableOptions.includes(qualityValue)) {
+                            player.setQuality(qualityValue);
+                            executionCount++;
+                        } else {
+                            // Safe fallback condition for un-partnered stream channels or missing exact frame values
+                            player.setQuality('auto');
+                        }
+                    } catch(e) {
+                        // Suppress frame lock runtime edge constraints securely
+                    }
                 }
+            });
+            
+            showToast(`Syncing channels to quality preset: ${qualityValue === 'chunked' ? 'Source' : qualityValue}`);
+        }
+
+        function toggleOfflineFilter() {
+            hideOfflineStreams = !hideOfflineStreams;
+            
+            const filterIcon = document.getElementById('filterIcon');
+            const filterText = document.getElementById('filterText');
+            
+            if (hideOfflineStreams) {
+                toggleOfflineFilterBtn.className = "bg-red-950 text-red-200 border border-red-800 px-3 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2";
+                filterIcon.setAttribute('data-lucide', 'video-off');
+                filterText.innerText = "Hiding Offline";
+            } else {
+                toggleOfflineFilterBtn.className = "bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 px-3 py-2 rounded-xl text-sm font-medium transition flex items-center gap-2";
+                filterIcon.setAttribute('data-lucide', 'video');
+                filterText.innerText = "Showing All";
             }
             lucide.createIcons();
+            
+            evalVisibilityFilter();
+        }
+
+        function evalVisibilityFilter() {
+            let visibleCount = 0;
+            
+            activeStreams.forEach(stream => {
+                const card = document.querySelector(`[data-channel="${stream}"]`);
+                if (!card) return;
+                
+                const isOnline = streamOnlineStates[stream] === true;
+                
+                if (hideOfflineStreams && !isOnline) {
+                    card.classList.add('card-offline-hidden');
+                } else {
+                    card.classList.remove('card-offline-hidden');
+                    visibleCount++;
+                }
+            });
+
+            streamGrid.className = "flex-1 p-4 grid gap-4 items-center justify-center w-full";
+            
+            if (visibleCount === 0 && activeStreams.length > 0) {
+                streamGrid.className = "flex-1 p-4 flex flex-col items-center justify-center text-slate-500 italic text-sm";
+                streamGrid.innerHTML = `<div class="text-center py-12"><i data-lucide="video-off" class="w-8 h-8 mx-auto mb-2 text-slate-600"></i>All added streams are currently offline.</div>`;
+                lucide.createIcons();
+            } else if (activeStreams.length > 0) {
+                if (visibleCount === 1) streamGrid.classList.add('grid-cols-1');
+                else if (visibleCount === 2) streamGrid.classList.add('md:grid-cols-2', 'grid-cols-1');
+                else if (visibleCount <= 4) streamGrid.classList.add('md:grid-cols-2', 'grid-cols-1');
+                else if (visibleCount <= 6) streamGrid.classList.add('lg:grid-cols-3', 'md:grid-cols-2', 'grid-cols-1');
+                else streamGrid.classList.add('xl:grid-cols-4', 'lg:grid-cols-3', 'md:grid-cols-2', 'grid-cols-1');
+            }
+        }
+
+        function launchTheaterMode(channelName) {
+            theaterTitle.innerHTML = `<i data-lucide="tv" class="w-4 h-4"></i> Viewing POV: /${channelName}`;
+            theaterPlayerContainer.innerHTML = '';
+            theaterOverlay.classList.remove('hidden');
+            lucide.createIcons();
+
+            const currentDomain = window.location.hostname;
+            theaterPlayer = new Twitch.Player("theaterPlayerContainer", {
+                width: '100%',
+                height: '100%',
+                channel: channelName,
+                parent: [currentDomain],
+                muted: false, 
+                controls: true 
+            });
+
+            theaterPlayer.addEventListener(Twitch.Player.READY, () => {
+                theaterPlayer.setMuted(false);
+                theaterPlayer.play();
+                // Match the active theater screen to the current global configuration state automatically
+                if(selectedGlobalQuality !== "auto") {
+                    try { theaterPlayer.setQuality(selectedGlobalQuality); } catch(e){}
+                }
+            });
+        }
+
+        function closeTheaterMode() {
+            theaterOverlay.classList.add('hidden');
+            theaterPlayerContainer.innerHTML = '';
+            theaterPlayer = null;
+            activeStreams.forEach(s => {
+                if(playerInstances[s]) playerInstances[s].play();
+            });
         }
 
         function renderSidebarIndex() {
@@ -228,12 +377,16 @@
 
             activeStreams.forEach(stream => {
                 const player = playerInstances[stream];
-                const isMuted = player ? player.getMuted() : true;
+                const isMuted = player ? player.getMuted() : currentMuteStates[stream];
+                const isOnline = streamOnlineStates[stream] === true;
 
                 const item = document.createElement('div');
                 item.className = "flex items-center justify-between p-2 bg-slate-950 rounded-xl border border-slate-800 text-sm";
                 item.innerHTML = `
-                    <span class="font-medium truncate text-slate-300 pl-1">/${stream}</span>
+                    <div class="flex items-center gap-2 truncate pl-1">
+                        <span class="w-2 h-2 rounded-full shrink-0 ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-700'}" title="${isOnline ? 'Live' : 'Offline'}"></span>
+                        <span class="font-medium truncate ${isOnline ? 'text-slate-200' : 'text-slate-500 line-through'}">/${stream}</span>
+                    </div>
                     <div class="flex items-center gap-1 shrink-0">
                         <button onclick="toggleAudioIndex('${stream}')" class="p-1.5 rounded-lg transition ${isMuted ? 'text-slate-500 hover:bg-slate-800 hover:text-slate-300' : 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20'}" title="${isMuted ? 'Unmute' : 'Mute'}">
                             <i data-lucide="${isMuted ? 'volume-x' : 'volume-2'}" class="w-3.5 h-3.5"></i>
@@ -246,6 +399,86 @@
                 indexStreamList.appendChild(item);
             });
             lucide.createIcons();
+        }
+
+        function buildTwitchPlayerInstance(stream) {
+            const containerId = `player-target-${stream}`;
+            const target = document.getElementById(containerId);
+            if (!target) return;
+
+            const currentDomain = window.location.hostname;
+            const options = {
+                width: '100%',
+                height: '100%',
+                channel: stream,
+                parent: [currentDomain || "localhost"],
+                muted: currentMuteStates[stream] !== undefined ? currentMuteStates[stream] : true,
+                controls: false 
+            };
+
+            const player = new Twitch.Player(containerId, options);
+            playerInstances[stream] = player;
+
+            // Trigger targeted optimization the moment player states settle completely
+            player.addEventListener(Twitch.Player.READY, () => {
+                if(selectedGlobalQuality !== "auto") {
+                    try {
+                        const formats = player.getQualities();
+                        if(formats.includes(selectedGlobalQuality)) {
+                            player.setQuality(selectedGlobalQuality);
+                        }
+                    } catch(e){}
+                }
+            });
+
+            player.addEventListener(Twitch.Player.ONLINE, () => {
+                streamOnlineStates[stream] = true;
+                renderSidebarIndex();
+                evalVisibilityFilter();
+            });
+
+            player.addEventListener(Twitch.Player.OFFLINE, () => {
+                streamOnlineStates[stream] = false;
+                renderSidebarIndex();
+                evalVisibilityFilter();
+            });
+        }
+
+        function startGlobalKeepAlive() {
+            if (globalKeepAliveInterval) clearInterval(globalKeepAliveInterval);
+
+            globalKeepAliveInterval = setInterval(() => {
+                activeStreams.forEach(stream => {
+                    const player = playerInstances[stream];
+                    if (!player) return;
+
+                    try {
+                        const streamData = player.getStreamInfo();
+                        const isCurrentlyLive = !!(streamData && Object.keys(streamData).length > 0);
+
+                        if (streamOnlineStates[stream] !== isCurrentlyLive) {
+                            streamOnlineStates[stream] = isCurrentlyLive;
+                            renderSidebarIndex();
+                            evalVisibilityFilter();
+                        }
+
+                        if (isCurrentlyLive && player.isPaused()) {
+                            console.log(`[Watcher Keep-Alive] Proactively wake up stream feed: /${stream}`);
+                            player.play();
+                        }
+
+                        // NEW ENFORCEMENT STAGE: Ensure background renders maintain our selected global quality target context
+                        if (isCurrentlyLive && selectedGlobalQuality !== "auto" && player.getQuality() !== selectedGlobalQuality) {
+                            const qualities = player.getQualities();
+                            if (qualities.includes(selectedGlobalQuality)) {
+                                player.setQuality(selectedGlobalQuality);
+                            }
+                        }
+                    } catch (err) {
+                        // Suppress initialization handshake exceptions cleanly
+                    }
+                });
+            }, 2500); 
         }
 
         function updateUI() {
@@ -261,32 +494,21 @@
             sidebarPanel.classList.remove('hidden');
             streamGrid.innerHTML = '';
 
-            const count = activeStreams.length;
-            streamGrid.className = "flex-1 p-4 grid gap-4 items-center justify-center w-full";
-            
-            if (count === 1) streamGrid.classList.add('grid-cols-1');
-            else if (count === 2) streamGrid.classList.add('md:grid-cols-2', 'grid-cols-1');
-            else if (count <= 4) streamGrid.classList.add('md:grid-cols-2', 'grid-cols-1');
-            else if (count <= 6) streamGrid.classList.add('lg:grid-cols-3', 'md:grid-cols-2', 'grid-cols-1');
-            else streamGrid.classList.add('xl:grid-cols-4', 'lg:grid-cols-3', 'md:grid-cols-2', 'grid-cols-1');
-
             activeStreams.forEach((stream, index) => {
                 const cardId = `stream-card-${index}`;
                 const playerContainerId = `player-target-${stream}`;
                 
                 const card = document.createElement('div');
                 card.id = cardId;
-                card.setAttribute('data-channel', stream); // Used to query arrangement positions
-                card.className = "relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden aspect-video w-full h-full group shadow-md transition-shadow duration-200";
+                card.setAttribute('data-channel', stream); 
+                card.className = "relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden aspect-video w-full h-full group shadow-md transition-all duration-200";
                 
                 card.innerHTML = `
-                    <div id="${playerContainerId}" class="w-full h-full"></div>
-                    
-                    <div class="absolute inset-0 z-0 bg-transparent hidden group-[.sortable-chosen]:block"></div>
+                    <div id="${playerContainerId}" class="w-full h-full bg-slate-950"></div>
 
                     <div class="absolute top-0 inset-x-0 bg-gradient-to-b from-slate-950/80 to-transparent p-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200 flex justify-between items-center z-10 pointer-events-none">
                         
-                        <span class="drag-handle bg-red-600 text-white text-xs font-bold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-md pointer-events-auto cursor-grab active:cursor-grabbing hover:bg-red-700 transition" title="Hold and Drag to sort layout">
+                        <span class="drag-handle bg-red-600 text-white text-xs font-bold px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-md pointer-events-auto cursor-grab active:cursor-grabbing hover:bg-red-700 transition">
                             <i data-lucide="grip-vertical" class="w-3.5 h-3.5 opacity-80"></i> ${stream}
                         </span>
                         
@@ -294,8 +516,8 @@
                             <button onclick="toggleAudioIndex('${stream}')" class="bg-slate-950/90 hover:bg-slate-800 text-slate-300 hover:text-white p-1.5 rounded-lg transition shadow-md">
                                 <i data-lucide="volume-2" class="w-4 h-4"></i>
                             </button>
-                            <button onclick="toggleMaximize('${cardId}', '${stream}')" class="bg-slate-950/90 hover:bg-slate-800 text-slate-300 hover:text-white p-1.5 rounded-lg transition shadow-md">
-                                <i id="max-icon-${cardId}" data-lucide="maximize-2" class="w-4 h-4"></i>
+                            <button onclick="launchTheaterMode('${stream}')" class="bg-slate-950/90 hover:bg-slate-800 text-slate-300 hover:text-white p-1.5 rounded-lg transition shadow-md" title="Maximize POV">
+                                <i data-lucide="maximize-2" class="w-4 h-4"></i>
                             </button>
                             <button onclick="removeStream('${stream}')" class="bg-slate-950/90 hover:bg-red-600 text-slate-300 hover:text-white p-1.5 rounded-lg transition shadow-md">
                                 <i data-lucide="x" class="w-4 h-4"></i>
@@ -304,25 +526,10 @@
                     </div>
                 `;
                 streamGrid.appendChild(card);
-
-                const currentDomain = window.location.hostname;
-                const options = {
-                    width: '100%',
-                    height: '100%',
-                    channel: stream,
-                    parent: [currentDomain],
-                    muted: true,
-                    controls: false 
-                };
-                
-                const newPlayer = new Twitch.Player(playerContainerId, options);
-                playerInstances[stream] = newPlayer;
-
-                newPlayer.addEventListener(Twitch.Player.READY, () => {
-                    renderSidebarIndex();
-                });
+                buildTwitchPlayerInstance(stream);
             });
 
+            evalVisibilityFilter();
             updateUrlHistory();
         }
 
@@ -356,6 +563,12 @@
             if(currentSaved[index]) {
                 activeStreams = [...currentSaved[index].channels];
                 playerInstances = {};
+                currentMuteStates = {};
+                streamOnlineStates = {};
+                activeStreams.forEach(s => {
+                    currentMuteStates[s] = true;
+                    streamOnlineStates[s] = false;
+                });
                 updateUI();
                 showToast(`Loaded: ${currentSaved[index].label}`);
             }
